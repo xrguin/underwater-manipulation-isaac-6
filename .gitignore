@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Experiment outputs (npz logs, plots, Monte Carlo CSVs, videos) — kept local
+EDMDc/data/
+EDMDc/recording/
+
+# Large Isaac USD assets (206 MB fine-mesh USD exceeds GitHub's 100 MB limit).
+# See assets/README.md; obtain from the local workstation or asset share.
+assets/BlueROVHeavy/
+
+# Local agent/editor state
+.claude/settings.local.json
+.agents/
+.codex/
+nohup.out

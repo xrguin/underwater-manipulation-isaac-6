@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "Agent(*)",
+      "Read(//tmp/**)",
+      "Bash(rm -f experiment_notes.aux experiment_notes.toc experiment_notes.log experiment_notes.nav experiment_notes.snm experiment_notes.out experiment_notes.synctex.gz)",
+      "Bash(pdflatex -interaction=nonstopmode -halt-on-error experiment_notes.tex)",
+      "WebFetch(domain:par.nsf.gov)"
+    ],
+    "deny": [],
+    "additionalDirectories": [
+      "/home/xzha/.claude/plans"
+    ],
+    "env": {
+      "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    }
+  }
+}
