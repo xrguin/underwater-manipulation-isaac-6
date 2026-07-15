@@ -79,7 +79,18 @@ CUBE_OFFSET_FROM_GRIPPER = np.array([0.1, 0.0, -0.0], dtype=float)  # at the jaw
 CUBE_BUOY_N         = 997.0 * 9.81 * (CUBE_SIDE_M ** 3)  # ≈ 5.01 N up (997 = fossen.RHO_WATER)
 CUBE_OFFSET         = GRIPPER_OFFSET + CUBE_OFFSET_FROM_GRIPPER  # cube center from base_link
 
-DEFAULT_SPAWN = np.array([0.0, 0.0, -1.0], dtype=float)
+DEFAULT_SPAWN = np.array([0.0, 0.0, -0.2], dtype=float)
+
+# Centered trim (sim analog of the physical foam re-trim after mounting
+# the gripper): put the composite COG and the effective COB on the
+# vehicle's vertical center axis (x = y = 0), keeping their heights so
+# the metacentric separation (BM ~ 11.8 mm) and passive roll/pitch
+# stability are unchanged. Two closed-form pieces (see show_cog_cob):
+#   * an authored base-link COM cancels the gripper's horizontal MASS
+#     moment      -> composite COG at x=y=0;
+#   * a hull-COB x/y trim cancels the gripper's horizontal BUOYANCY
+#     moment      -> effective COB at x=y=0.
+# Untrimmed, the misalignment gives a +13.7 deg passive pitch equilibrium.
 
 
 # ============================================================================
@@ -214,15 +225,27 @@ class GripperScene:
         force-render flag).
     neutral_buoyancy : bool, default True
         Override Fossen's displacement so ρgV = mg.
+    retrim_level : bool, default True
+        Apply the centered trim: composite COG and effective COB both on
+        the vertical center axis (x=y=0, heights unchanged, BM intact),
+        so the gripper composite floats level like the re-trimmed
+        physical vehicle. ``False`` restores the un-trimmed configuration
+        (passive pitch equilibrium ~13.7 deg) that the pre-trim
+        datasets/models assume. The trim targets the bare gripper
+        composite — a payload cube's moment is intentionally NOT
+        trimmed away.
     payload_cube : bool, default False
         Weld a 1 kg negatively-buoyant cube to the gripper jaws (second
         FixedJoint). The cube's mass/inertia/COG are real in PhysX and its
         buoyancy is injected per-tick by :meth:`apply_wrench`, giving a net
         ~4.8 N down disturbance (the ROV mass is NOT compensated). See the
         ``CUBE_*`` module constants.
-    spawn_pos : array-like, default (0, 0, -1)
-        World-frame spawn position. 1 m below the water surface matches
-        the existing collect/teleop defaults.
+    spawn_pos : array-like, default (0, 0, -0.2)
+        World-frame spawn position. The default drops the vehicle in at
+        the water surface (WATER_SURFACE_Z = -0.2) like a real tank
+        deployment; the neutral-buoyant body sinks to full submersion
+        (center ~ -0.3) as the surface buoyancy taper fades. Fits both
+        the tank env (floor -0.8) and the legacy pools.
     vehicle : str, default "BlueROVHeavy"
         Vehicle name used to locate ``assets/<vehicle>/<vehicle>.usd``
         and ``.yaml``.
@@ -236,6 +259,7 @@ class GripperScene:
                  mass_kg: float = 13.5,
                  headless: bool = False,
                  neutral_buoyancy: bool = True,
+                 retrim_level: bool = True,
                  payload_cube: bool = False,
                  cube_mass_kg: float = CUBE_MASS_KG,
                  cube_buoy_N: float | None = None,
@@ -294,6 +318,7 @@ class GripperScene:
         import yaml as _yaml  # noqa: E402
         from .fossen import (  # noqa: E402
             Fossen, FossenParams, RHO_WATER as _RHO_WATER,
+            GRAVITY as _GRAVITY,
             quat_wxyz_to_rotmat, quat_wxyz_to_euler_zyx,
         )
         from .thrusters import (  # noqa: E402
@@ -320,6 +345,13 @@ class GripperScene:
         fparams = FossenParams.from_yaml(VEHICLE_YAML)
         if neutral_buoyancy:
             fparams.volume = float(mass_kg) / _RHO_WATER
+        if retrim_level:
+            B_hull = _RHO_WATER * _GRAVITY * fparams.volume
+            fparams.cob_x = -GRIPPER_BUOY_N * GRIPPER_OFFSET[0] / B_hull
+            fparams.cob_y = -GRIPPER_BUOY_N * GRIPPER_OFFSET[1] / B_hull
+            print(f"[scene] centered trim: hull COB ({fparams.cob_x*1000:+.2f}, "
+                  f"{fparams.cob_y*1000:+.2f}, {fparams.cob_offset*1000:+.1f}) mm "
+                  f"(COG/COB on center axis; retrim_level=False for legacy)")
         self._fossen = Fossen(fparams,
                               enable_added_mass=True,
                               added_mass_lp_alpha=0.3,
@@ -352,6 +384,19 @@ class GripperScene:
         adjusted_rov_mass = float(mass_kg) - GRIPPER_NET_WET_KG
         UsdPhysics.MassAPI(self._stage.GetPrimAtPath("/World/Vehicle/base_link"))\
             .GetMassAttr().Set(adjusted_rov_mass)
+        if retrim_level:
+            # Authored base-link COM cancels the gripper's horizontal mass
+            # moment, putting the composite COG on the center axis (the z
+            # moment is left alone so COG/COB heights — and BM — stay put).
+            # NOTE: apply_wrench applies Fossen forces at the base origin
+            # explicitly, so an off-origin COM stays consistent with the
+            # torque bookkeeping.
+            com_trim = -GRIPPER_MASS_KG * GRIPPER_OFFSET / adjusted_rov_mass
+            UsdPhysics.MassAPI(self._stage.GetPrimAtPath("/World/Vehicle/base_link"))\
+                .CreateCenterOfMassAttr().Set(
+                    Gf.Vec3f(float(com_trim[0]), float(com_trim[1]), 0.0))
+            print(f"[scene] centered trim: base COM authored at "
+                  f"({com_trim[0]*1000:+.2f}, {com_trim[1]*1000:+.2f}, +0.00) mm")
 
         # Position the gripper at the offset before the FixedJoint snaps it.
         _gxform = UsdGeom.Xformable(self._stage.GetPrimAtPath("/World/Gripper"))
@@ -621,9 +666,15 @@ class GripperScene:
             force_w  = force_w  + cube_F
             torque_w = torque_w + cube_T
 
+        # Apply at the base-link ORIGIN explicitly: every torque above is
+        # computed about that point. Without `positions`, PhysX applies the
+        # force at the link COM instead — correct only while COM == origin
+        # (true for the stock asset, silently wrong once a COM is authored,
+        # e.g. by show_cog_cob --centered).
         self._base_view.apply_forces_and_torques_at_pos(
             forces=np.asarray(force_w, dtype=float).reshape(1, 3),
             torques=np.asarray(torque_w, dtype=float).reshape(1, 3),
+            positions=np.asarray(base_pos_w, dtype=float).reshape(1, 3),
             is_global=True,
         )
         if render is None:

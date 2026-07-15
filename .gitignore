@@ -16,3 +16,6 @@ assets/BlueROVHeavy/
 .agents/
 .codex/
 nohup.out
+
+# Literature PDFs — keep local (copyright)
+*.pdf

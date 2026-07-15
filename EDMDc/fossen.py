@@ -40,6 +40,10 @@ class FossenParams:
     added_mass: np.ndarray          # (6,) diagonal of M_A
     linear_damping: np.ndarray      # (6,) diagonal of D_L
     quadratic_damping: np.ndarray   # (6,) diagonal of D_Q
+    # Fore-aft / lateral COB trim (the sim analog of moving buoyancy foam
+    # to re-level the vehicle after mounting a payload like the gripper).
+    cob_x: float = 0.0              # m, + = COB shifted toward the nose
+    cob_y: float = 0.0              # m, + = COB shifted to starboard
 
     @classmethod
     def from_yaml(cls, path: str) -> "FossenParams":
@@ -49,6 +53,8 @@ class FossenParams:
         return cls(
             volume=float(p["volume"]),
             cob_offset=float(p["coBM"]),
+            cob_x=float(p.get("coBx", 0.0)),
+            cob_y=float(p.get("coBy", 0.0)),
             added_mass=np.asarray(h["added_mass"], dtype=np.float64),
             linear_damping=np.asarray(h["linear_damping"], dtype=np.float64),
             quadratic_damping=np.asarray(h["quadratic_damping"], dtype=np.float64),
@@ -227,7 +233,7 @@ class Fossen:
         # Gated by submerged fraction if a water surface was configured.
         sub = self._submerged_fraction(body_z_world)
         buoy_force = sub * np.array([0.0, 0.0, self.buoyancy_magnitude])
-        cob_world = R @ np.array([0.0, 0.0, self.p.cob_offset])
+        cob_world = R @ np.array([self.p.cob_x, self.p.cob_y, self.p.cob_offset])
         buoy_torque = np.cross(cob_world, buoy_force)
         force_world = force_world + buoy_force
         torque_world = torque_world + buoy_torque
