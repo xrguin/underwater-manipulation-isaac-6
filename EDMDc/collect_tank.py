@@ -51,6 +51,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--amp-z", type=float, default=0.28)
     p.add_argument("--hold", type=float, default=0.4)
     p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--control-hz", type=int, default=60,
+                   help="Control/sampling rate [Hz]. Physics always steps at "
+                        "60 Hz; the command is computed every 60/control_hz "
+                        "ticks and zero-order-held in between, and states are "
+                        "logged at those control instants (rehearses the real "
+                        "robot's ~20 Hz state-estimate rate). Must divide 60.")
     return p.parse_args()
 
 
@@ -65,10 +71,17 @@ def main() -> int:
 
     from .isaac_scene import GripperScene
 
+    if 60 % args.control_hz:
+        raise SystemExit(f"--control-hz must divide 60, got {args.control_hz}")
+    decim = 60 // args.control_hz
+
     scene = GripperScene(dt=1 / 60, headless=True,
                          env_usd=str(PROJECT / "assets" / "environment_tank.usda"),
                          spawn_pos=np.array(CENTER))
-    dt = scene.dt
+    dt = scene.dt                       # physics step (1/60)
+    dt_ctrl = decim * dt                # control/sampling step
+    print(f"[collect-tank] control rate {args.control_hz} Hz "
+          f"(decimation {decim}, dt_ctrl={dt_ctrl:.4f} s)")
 
     def box_violation(pos, yaw, pitch):
         return (abs(pos[0]) > BOX_X or abs(pos[1]) > BOX_Y
@@ -120,10 +133,10 @@ def main() -> int:
         for _ in range(int(round(2.0 / dt))):
             scene.apply_wrench(np.zeros(4))
         aprbs = Aprbs(rng)
-        n_max = int(round(args.seconds / dt))
+        n_ctrl = int(round(args.seconds * args.control_hz))
         nus, etas, cmds, excite = [], [], [], []
         recovering = False
-        for k in range(n_max):
+        for k in range(n_ctrl):
             st = scene.read_state()
             if not recovering and box_violation(st.pos_w, st.yaw, st.pitch):
                 recovering = True
@@ -134,12 +147,14 @@ def main() -> int:
                 if recovered(st):
                     recovering = False
             else:
-                cmd[:3] = np.clip(aprbs.step(k * dt) + center_pid(st), -0.9, 0.9)
+                cmd[:3] = np.clip(aprbs.step(k * dt_ctrl) + center_pid(st),
+                                  -0.9, 0.9)
             nus.append(st.nu.copy())
             etas.append(np.array([*st.pos_w, st.roll, st.pitch, st.yaw]))
             cmds.append(cmd.copy())
             excite.append(not recovering)
-            scene.apply_wrench(cmd)
+            for _ in range(decim):          # zero-order hold across 60 Hz ticks
+                scene.apply_wrench(cmd)
         return (np.asarray(nus), np.asarray(etas), np.asarray(cmds),
                 np.asarray(excite, dtype=bool))
 
@@ -156,7 +171,9 @@ def main() -> int:
         X, U, Xn, Eta, ti, si = (np.concatenate(c) for c in zip(*chunks))
         np.savez(
             path, X=X, U=U, X_next=Xn, Eta=Eta, traj_idx=ti, step_idx=si,
-            dt=np.float64(dt), episode_seconds=np.float64(args.seconds),
+            dt=np.float64(dt_ctrl), sim_dt=np.float64(dt),
+            control_hz=np.int32(args.control_hz),
+            episode_seconds=np.float64(args.seconds),
             input_units="normalized_cmd4",
             aprbs_amp=np.float64(args.amp), aprbs_amp_z=np.float64(args.amp_z),
             aprbs_hold_max_s=np.float64(args.hold),
