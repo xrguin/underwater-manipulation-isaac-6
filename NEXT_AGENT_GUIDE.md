@@ -3,9 +3,22 @@
 ## Start here
 
 The next objective is to collect real simulator trajectories in the free-drift
-(`--infinite-env`) configuration, train the Gaussian and 34D models on exactly
-the same training trajectories, tune them on exactly the same validation
-trajectories, and compare them once on an untouched test set.
+configuration at **20 Hz control / 60 Hz physics** (via
+`EDMDc.collect_tank --infinite --control-hz 20`, NOT `collect_isaac`, whose
+`--dt` changes the physics step itself), train the Gaussian and 34D models on
+exactly the same training trajectories, tune them on exactly the same
+validation trajectories, and compare them once on an untouched test set.
+
+Decisions locked 2026-07-21 (session with user):
+
+- Sampling rate 20 Hz (`dt = 0.05 s`), physics stays at 60 Hz (decimation 3,
+  zero-order-held commands, states logged at control instants).
+- All four command axes excited (`--yaw-amp > 0`); free drift, no
+  station-keeping, no yaw hold.
+- Excitation box **±0.25** on every axis — see "Input convention" below.
+- Comparison is modeling-only for now (open-loop prediction). No MPC yet.
+- Primary metric: sliding-window K-step RMSE (`Gaussian_dictionary.evaluate_kstep`)
+  in addition to the from-start rollout in `Gaussian_dictionary.evaluate`.
 
 Read these files before changing anything:
 
@@ -17,6 +30,7 @@ Read these files before changing anything:
 - `EDMDc/edmdc.py`
 - `EDMDc/collect_fossen.py`
 - `EDMDc/collect_isaac.py`
+- `EDMDc/collect_tank.py` — the actual 20 Hz collector (`--infinite` mode)
 
 Do not rewrite the existing Fossen dynamics or force roll/pitch states to zero.
 The existing `EDMDc/` implementation should remain unchanged unless the user
@@ -51,6 +65,31 @@ The 34D comparison model uses the existing dictionary:
 
 It produces `A` shape `34 x 34` and `B` shape `34 x 4` when trained on the
 normalized four-axis command.
+
+### Input convention (decided 2026-07-21)
+
+At deployment the pilot chain applies safety factor 0.5 × pilot gain 0.5, so
+the vehicle only ever receives normalized commands in **[-0.25, 0.25]** (on
+the [-1, 1] full-throttle scale). Convention:
+
+- **Record `U` in real post-gain units ([-0.25, 0.25])**, never rescaled to
+  [-1, 1]. For a model linear in `u`, a constant rescale is absorbed into `B`
+  (predictions identical), so rescaling buys nothing and creates a unit trap
+  the moment the gain chain changes. This matches standard sysID practice
+  (record the input the plant actually receives — cf. ArduPilot logging
+  post-gain RCOU, not stick inputs).
+- **Excite inside the deployment box (±0.25)**. The throttle→thrust map is
+  nonlinear (ESC deadband + T200 polynomial, `EDMDc/thrusters.py`), so the
+  fitted `B` is a local linearization averaged over the training amplitude
+  distribution — training at full ±1 would learn the wrong gain for ±0.25
+  operation. Same lesson as the earlier inscribed-box wrench caps.
+- Heave keeps the collector's deadband floor: `|cmd_z|` is drawn from
+  `[Z_FLOOR=0.20, 0.25]`, a narrow band. Check the heave input histogram in
+  QA and note it in the report.
+- Store the gain factors with the dataset so the scale is recoverable
+  (`aprbs_amp*` fields already cover this; safety factor and pilot gain are
+  0.5 × 0.5 for all splits).
+- Later controller configs must use `u_min/u_max = ±0.25`.
 
 Positions are not part of either velocity predictor. Pose integration and the
 outer position controller remain outside the learned velocity model. Roll and
@@ -138,17 +177,18 @@ loop stability cannot be inferred from open-loop `A` alone.
 Use three disjoint sets of complete trajectories. Never randomly split rows
 from the same trajectory because adjacent time samples would leak across sets.
 
-Recommended full collection target:
+Episodes are 60 s of free drift at 20 Hz (~1,200 pairs each when the guard
+does not trip). Pilot first, full collection only after QA passes:
 
 ```text
-training:    200 trajectories, seed 101
-validation:   40 trajectories, seed 202
-test:         40 trajectories, seed 303
+pilot:  training 20 episodes seed 101 | validation 5 episodes seed 202
+        | test 5 episodes seed 303
+full:   revisit the volume after the pilot learning curve; the guide's
+        original 200/40/40 target is an upper bound, not a commitment.
 ```
 
-If Isaac collection is expensive, first run a pilot with `20 / 5 / 5`
-trajectories. Confirm data quality and the complete workflow before launching
-the full collection.
+`collect_tank` seeds each episode with `SeedSequence((seed, ep))`, so
+different `--seed` values give fully disjoint excitation streams per split.
 
 Keep these identical across all three sets:
 
@@ -168,52 +208,45 @@ but use normalized commanded `U` for the primary controller-model comparison.
 
 ## Collection sequence
 
-### 1. Fast Fossen pilot
+Collection runs through `EDMDc.collect_tank --infinite`: deep-pool free
+drift, spawn (0, 0, -5), fully exogenous 4-axis APRBS (no station-keeping, no
+yaw hold), episode ends only on tipover (|roll| or |pitch| > 60°) or the
+generous pool-interior guard (±13 m walls, z ∈ (-9.3, -0.6)). Do NOT use
+`collect_isaac --dt 0.05` for the 20 Hz runs — there `--dt` sets
+`physics_dt`, which changes the physics itself instead of decimating control.
 
-Fossen has no wall-contact dynamics, so it is the fastest way to verify the
-experiment and tune data volume. The local `rov` environment currently lacks
-PyYAML; use the simulator environment with the repository dependencies.
-
-Example pilot commands:
-
-```bash
-conda activate marinegym
-python -m EDMDc.collect_fossen --n 20 --episode-s 5 --dt 0.0166666667 \
-  --seed 101 --out EDMDc/data/gaussian/fossen_train_pilot.npz
-python -m EDMDc.collect_fossen --n 5 --episode-s 5 --dt 0.0166666667 \
-  --seed 202 --out EDMDc/data/gaussian/fossen_validation_pilot.npz
-python -m EDMDc.collect_fossen --n 5 --episode-s 5 --dt 0.0166666667 \
-  --seed 303 --out EDMDc/data/gaussian/fossen_test_pilot.npz
-```
-
-Do not use `--fx-only`; the comparison requires all four controlled axes.
-
-### 2. Isaac free-drift collection
-
-`EDMDc.collect_isaac` has `--infinite-env` enabled by default. It expands the
-Python truncation envelope to approximately 500 m radially and +/-100 m
-vertically. The decorative pool geometry does not enforce collision in this
-collector; see `CLAUDE.md` for the environment caveat.
-
-Use `--target-kept` so each split contains the requested number of complete,
-non-truncated APRBS trajectories. Example pilot commands:
+The collector writes `<stem>_train_<TS>.npz` / `<stem>_test_<TS>.npz` and
+crashes on `--test-episodes 0`, so each split runs with one extra dummy test
+episode whose output file is discarded; the split content is the run's
+"train" file. Pilot commands:
 
 ```bash
 conda activate marinegym
-python -m EDMDc.collect_isaac --target-kept 20 --episode-s 5 --seed 101 \
-  --headless --infinite-env \
-  --out EDMDc/data/gaussian/isaac_train_pilot.npz
-python -m EDMDc.collect_isaac --target-kept 5 --episode-s 5 --seed 202 \
-  --headless --infinite-env \
-  --out EDMDc/data/gaussian/isaac_validation_pilot.npz
-python -m EDMDc.collect_isaac --target-kept 5 --episode-s 5 --seed 303 \
-  --headless --infinite-env \
-  --out EDMDc/data/gaussian/isaac_test_pilot.npz
+# training split (20 kept episodes)
+python -m EDMDc.collect_tank --infinite --control-hz 20 \
+  --amp 0.25 --amp-z 0.25 --yaw-amp 0.25 --hold 1.0 --hold-min 0.4 \
+  --episodes 21 --test-episodes 1 --seconds 60 --seed 101
+# validation split (5 kept episodes)
+python -m EDMDc.collect_tank --infinite --control-hz 20 \
+  --amp 0.25 --amp-z 0.25 --yaw-amp 0.25 --hold 1.0 --hold-min 0.4 \
+  --episodes 6 --test-episodes 1 --seconds 60 --seed 202
+# test split (5 kept episodes)
+python -m EDMDc.collect_tank --infinite --control-hz 20 \
+  --amp 0.25 --amp-z 0.25 --yaw-amp 0.25 --hold 1.0 --hold-min 0.4 \
+  --episodes 6 --test-episodes 1 --seconds 60 --seed 303
 ```
 
-The Isaac collector enables the gripper by default. Use `--no-gripper` only if
-the intended comparison is specifically the bare ROV, and then use it for all
-splits. Keep payload-cube settings consistent as well.
+Copy the three kept files to canonical names before training:
+
+```text
+EDMDc/data/gaussian/free20_train_pilot.npz
+EDMDc/data/gaussian/free20_validation_pilot.npz
+EDMDc/data/gaussian/free20_test_pilot.npz
+```
+
+Hold times 0.4–1.0 s match the validated Jul-18 free-drift run. The vehicle
+configuration is whatever `GripperScene` defaults to — keep it identical
+across splits (it is, since all three runs use the same code path).
 
 Step-response trajectories are valuable as a separate stress test. Do not mix
 them silently into only one of the train/validation files. If collected, label
@@ -246,12 +279,12 @@ Baseline commands:
 
 ```bash
 python -m Gaussian_dictionary.gaussian_edmdc \
-  EDMDc/data/gaussian/isaac_train_pilot.npz \
+  EDMDc/data/gaussian/free20_train_pilot.npz \
   --n-rbfs 2 --center-method kmeans --seed 7 --lam 1e-3 \
   --out Gaussian_dictionary/model/gaussian_2rbf_pilot.npz
 
-python -m EDMDc.edmdc EDMDc/data/gaussian/isaac_train_pilot.npz \
-  --lam 1e-3 --out EDMDc/model/edmdc_34d_pilot.npz
+python -m EDMDc.edmdc EDMDc/data/gaussian/free20_train_pilot.npz \
+  --lam 1e-3 --out EDMDc/model/edmdc_34d_free20_pilot.npz
 ```
 
 Suggested validation candidates:
@@ -269,15 +302,29 @@ freeze them before opening the test result.
 ## Fair validation and final comparison
 
 Run the same validation file, trajectory subset, state axes, inputs, and
-horizons for both models:
+horizons for both models. Two complementary metrics:
+
+1. `Gaussian_dictionary.evaluate` — from-start recursive rollout (one error
+   sample per trajectory per horizon; dominated by the initial transient).
+2. `Gaussian_dictionary.evaluate_kstep` — **primary metric**: sliding-window
+   K-step RMSE over every valid start index in every trajectory (the 20 Hz
+   analog of the old `validate_heldout_sweep` convention; K=10 at 20 Hz is
+   the old K=30 at 60 Hz, both 0.5 s).
 
 ```bash
 python -m Gaussian_dictionary.evaluate \
   Gaussian_dictionary/model/gaussian_2rbf_pilot.npz \
-  EDMDc/data/gaussian/isaac_validation_pilot.npz \
-  --compare-34d EDMDc/model/edmdc_34d_pilot.npz \
+  EDMDc/data/gaussian/free20_validation_pilot.npz \
+  --compare-34d EDMDc/model/edmdc_34d_free20_pilot.npz \
   --horizons 1 5 10 25 50 100 \
   --out Gaussian_dictionary/results/validation_pilot.csv
+
+python -m Gaussian_dictionary.evaluate_kstep \
+  Gaussian_dictionary/model/gaussian_2rbf_pilot.npz \
+  EDMDc/data/gaussian/free20_validation_pilot.npz \
+  --compare-34d EDMDc/model/edmdc_34d_free20_pilot.npz \
+  --horizons 1 5 10 20 40 100 \
+  --out Gaussian_dictionary/results/validation_pilot_kstep.csv
 ```
 
 After hyperparameters are frozen, repeat once on the untouched test file and
@@ -298,6 +345,11 @@ The 34D model predicts `p,q` and the Gaussian model does not. The main fair
 accuracy table must compare `[u,v,w,r]`; report 34D `p,q` accuracy separately.
 
 ## Closed-loop phase comes after modeling validation
+
+Deferred by user decision (2026-07-21): the current campaign is
+dictionary-design comparison only — no MPC runs yet. When the closed-loop
+phase does start, remember the controller command caps are ±0.25 (see "Input
+convention"), not the ±1.0 defaults in `GaussianMPCConfig`.
 
 Open-loop `rho(A)<1` does not prove a better controller. After selecting
 models from held-out prediction results, run both inside controllers using the

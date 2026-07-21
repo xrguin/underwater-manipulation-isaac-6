@@ -57,6 +57,20 @@ def parse_args() -> argparse.Namespace:
                         "ticks and zero-order-held in between, and states are "
                         "logged at those control instants (rehearses the real "
                         "robot's ~20 Hz state-estimate rate). Must divide 60.")
+    p.add_argument("--infinite", action="store_true",
+                   help="Infinite-pool free drift instead of the tank: deep "
+                        "pool env, spawn (0,0,-5) far from surface and floor, "
+                        "NO station-keeping and NO yaw hold (fully exogenous "
+                        "input), episode ends only on tipover (|roll|/|pitch| "
+                        "> 60 deg) or the generous pool-interior guard. "
+                        "Output goes to EDMDc/data/free/.")
+    p.add_argument("--yaw-amp", type=float, default=0.0,
+                   help="Yaw APRBS amplitude (uniform +/-). 0 (default) = "
+                        "yaw held toward the tags (tank behavior); > 0 "
+                        "excites yaw — fixes the r-row identifiability.")
+    p.add_argument("--hold-min", type=float, default=None,
+                   help="APRBS hold-time lower bound [s]. Default: half of "
+                        "--hold.")
     return p.parse_args()
 
 
@@ -75,13 +89,24 @@ def main() -> int:
         raise SystemExit(f"--control-hz must divide 60, got {args.control_hz}")
     decim = 60 // args.control_hz
 
+    if args.infinite:
+        env_file, spawn = "environment_deep_pool.usd", (0.0, 0.0, -5.0)
+        out_dir = PROJECT / "EDMDc" / "data" / "free"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = "free"
+    else:
+        env_file, spawn = "environment_tank.usda", CENTER
+        stem = "tank"
+
     scene = GripperScene(dt=1 / 60, headless=True,
-                         env_usd=str(PROJECT / "assets" / "environment_tank.usda"),
-                         spawn_pos=np.array(CENTER))
+                         env_usd=str(PROJECT / "assets" / env_file),
+                         spawn_pos=np.array(spawn))
     dt = scene.dt                       # physics step (1/60)
     dt_ctrl = decim * dt                # control/sampling step
     print(f"[collect-tank] control rate {args.control_hz} Hz "
-          f"(decimation {decim}, dt_ctrl={dt_ctrl:.4f} s)")
+          f"(decimation {decim}, dt_ctrl={dt_ctrl:.4f} s), "
+          f"mode={'infinite free-drift' if args.infinite else 'tank dither'}, "
+          f"yaw_amp={args.yaw_amp}")
 
     def box_violation(pos, yaw, pitch):
         return (abs(pos[0]) > BOX_X or abs(pos[1]) > BOX_Y
@@ -107,24 +132,42 @@ def main() -> int:
                 and abs(st.pos_w[2] - CENTER[2]) < 0.08
                 and float(np.linalg.norm(st.nu[:3])) < 0.08)
 
+    hold_lo = args.hold_min if args.hold_min is not None else 0.5 * args.hold
+
     class Aprbs:
+        """4-channel continuous-amplitude APRBS ([surge, sway, heave, yaw]).
+        Heave draws sign*U(Z_FLOOR, amp_z) to clear the ESC deadband; yaw
+        is uniform +/- yaw_amp (0 -> channel stays silent)."""
+
         def __init__(self, rng):
             self.rng = rng
-            self.h = (0.5 * args.hold, args.hold)
-            self.val = np.zeros(3)
-            self.t_next = np.zeros(3)
+            self.h = (hold_lo, args.hold)
+            self.val = np.zeros(4)
+            self.t_next = np.zeros(4)
 
         def step(self, t):
-            for i in range(3):
+            for i in range(4):
                 if t >= self.t_next[i]:
                     if i == 2:
                         lo = min(Z_FLOOR, args.amp_z)
                         mag = self.rng.uniform(lo, args.amp_z)
                         self.val[i] = mag * self.rng.choice((-1.0, 1.0))
+                    elif i == 3:
+                        self.val[i] = (self.rng.uniform(-args.yaw_amp,
+                                                        args.yaw_amp)
+                                       if args.yaw_amp > 0 else 0.0)
                     else:
                         self.val[i] = self.rng.uniform(-args.amp, args.amp)
                     self.t_next[i] = t + self.rng.uniform(*self.h)
             return self.val.copy()
+
+    def guard_infinite(st):
+        """Tipover + generous deep-pool interior guard (walls at +/-15,
+        floor -10, surface -0.2)."""
+        return (abs(np.rad2deg(st.roll)) > 60.0
+                or abs(np.rad2deg(st.pitch)) > 60.0
+                or abs(st.pos_w[0]) > 13.0 or abs(st.pos_w[1]) > 13.0
+                or not (-9.3 < st.pos_w[2] < -0.6))
 
     def run_episode(ep):
         """Return per-step arrays: nu, eta, cmd, excite flag."""
@@ -138,17 +181,27 @@ def main() -> int:
         recovering = False
         for k in range(n_ctrl):
             st = scene.read_state()
-            if not recovering and box_violation(st.pos_w, st.yaw, st.pitch):
-                recovering = True
-            cmd = np.zeros(4)
-            cmd[3] = yaw_hold(st)
-            if recovering:
-                cmd[:3] = center_pid(st, gain=3.0, clip=0.45)
-                if recovered(st):
-                    recovering = False
+            if args.infinite:
+                if guard_infinite(st):
+                    print(f"[collect-tank]   ep guard trip at t={k * dt_ctrl:.1f}s "
+                          f"(pos={np.round(st.pos_w, 2)}, "
+                          f"roll={np.rad2deg(st.roll):+.0f} "
+                          f"pitch={np.rad2deg(st.pitch):+.0f} deg)")
+                    break
+                cmd = aprbs.step(k * dt_ctrl)          # fully exogenous, 4-axis
             else:
-                cmd[:3] = np.clip(aprbs.step(k * dt_ctrl) + center_pid(st),
-                                  -0.9, 0.9)
+                if not recovering and box_violation(st.pos_w, st.yaw, st.pitch):
+                    recovering = True
+                cmd = np.zeros(4)
+                cmd[3] = yaw_hold(st)
+                if recovering:
+                    cmd[:3] = center_pid(st, gain=3.0, clip=0.45)
+                    if recovered(st):
+                        recovering = False
+                else:
+                    cmd[:3] = np.clip(
+                        aprbs.step(k * dt_ctrl)[:3] + center_pid(st),
+                        -0.9, 0.9)
             nus.append(st.nu.copy())
             etas.append(np.array([*st.pos_w, st.roll, st.pitch, st.yaw]))
             cmds.append(cmd.copy())
@@ -176,7 +229,10 @@ def main() -> int:
             episode_seconds=np.float64(args.seconds),
             input_units="normalized_cmd4",
             aprbs_amp=np.float64(args.amp), aprbs_amp_z=np.float64(args.amp_z),
+            aprbs_yaw_amp=np.float64(args.yaw_amp),
             aprbs_hold_max_s=np.float64(args.hold),
+            aprbs_hold_min_s=np.float64(hold_lo),
+            mode=stem,
             z_floor=np.float64(Z_FLOOR), episodes=np.int32(episodes),
         )
         print(f"[collect-tank] saved {X.shape[0]:,} pairs "
@@ -191,8 +247,8 @@ def main() -> int:
         print(f"[collect-tank] ep{ep}: {int(excite.sum()):,}/{len(excite):,} "
               f"exciting steps, |nu| max={np.linalg.norm(nu[:, :3], axis=1).max():.3f}")
 
-    save(out_dir / f"tank_train_{ts}.npz", train_chunks, n_train_eps)
-    save(out_dir / f"tank_test_{ts}.npz", test_chunks, args.test_episodes)
+    save(out_dir / f"{stem}_train_{ts}.npz", train_chunks, n_train_eps)
+    save(out_dir / f"{stem}_test_{ts}.npz", test_chunks, args.test_episodes)
     scene.close()
     return 0
 
