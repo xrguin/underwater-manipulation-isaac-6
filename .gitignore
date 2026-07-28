@@ -3,8 +3,11 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Experiment outputs (npz logs, plots, Monte Carlo CSVs, videos) — kept local
-EDMDc/data/
+# Experiment outputs (npz logs, plots, Monte Carlo CSVs, videos) — kept local,
+# except the frozen 20 Hz free-drift pilot datasets (train/val/test, seeds
+# 101/202/303) shared for the Gaussian-vs-34D dictionary comparison.
+EDMDc/data/*
+!EDMDc/data/gaussian/
 EDMDc/recording/
 
 # Large Isaac USD assets (206 MB fine-mesh USD exceeds GitHub's 100 MB limit).
