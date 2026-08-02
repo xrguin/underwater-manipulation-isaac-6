@@ -252,6 +252,13 @@ class GripperScene:
     env_usd : str | None, default None
         Path to the environment USD. ``None`` resolves to
         ``assets/environment.usd``.
+    ardusub_stabilize : bool, default False
+        Add ArduSub-STABILIZE-style roll/pitch leveling through differential
+        vertical-thruster commands. This intentionally does not hold depth or
+        yaw. It is opt-in here so existing collection/baseline callers retain
+        their plant behavior; controlled entry points enable it by default.
+    stabilize_config : ArduSubStabilizeConfig | None
+        Optional explicit attitude-loop gains and trim angles.
     """
 
     def __init__(self, *,
@@ -267,7 +274,9 @@ class GripperScene:
                  vehicle: str = "BlueROVHeavy",
                  env_usd: Optional[str] = None,
                  width: int = 1280,
-                 height: int = 720):
+                 height: int = 720,
+                 ardusub_stabilize: bool = False,
+                 stabilize_config: Optional[Any] = None):
         self._dt = float(dt)
         self._headless = bool(headless)
         self._spawn = np.asarray(spawn_pos, dtype=float).copy()
@@ -279,6 +288,7 @@ class GripperScene:
         self._cube_buoy_N = (CUBE_BUOY_N if cube_buoy_N is None
                              else float(cube_buoy_N))
         self._force_render = False     # ChaseCam sets True while recording
+        self._last_state: Optional[SceneState] = None
 
         # ----- Boot Isaac --------------------------------------------------
         import isaacsim  # noqa: F401
@@ -292,17 +302,18 @@ class GripperScene:
         # ----- Isaac/USD imports (only available after SimulationApp()) ----
         import carb  # noqa: E402
         from pxr import UsdGeom, UsdPhysics, Gf  # noqa: E402
-        import omni.usd  # noqa: E402
-        from omni.isaac.core import World  # noqa: E402
-        from omni.isaac.core.utils.stage import add_reference_to_stage  # noqa: E402
-        from omni.isaac.core.articulations import Articulation  # noqa: E402
-        from omni.isaac.core.prims import RigidPrimView  # noqa: E402
+        from .isaac6_compat import (  # noqa: E402
+            Articulation,
+            RigidPrimView,
+            World,
+            add_reference_to_stage,
+            get_current_stage,
+        )
 
         # Stash module refs that ChaseCam / FPVCam will reuse.
         self._UsdGeom = UsdGeom
         self._UsdPhysics = UsdPhysics
         self._Gf = Gf
-        self._omni_usd = omni_usd_mod = omni.usd
 
         # Disable viewport grid (cleaner recordings).
         _settings = carb.settings.get_settings()
@@ -327,6 +338,7 @@ class GripperScene:
         from .ardusub_allocator import (  # noqa: E402
             COMMAND_DIM, StaticArduSubAllocator, command4_from_wrench6,
         )
+        from .ardusub_stabilize import ArduSubStabilizer  # noqa: E402
         # Stash for use in apply_wrench / read_state.
         self._quat_to_rotmat = quat_wxyz_to_rotmat
         self._quat_to_euler  = quat_wxyz_to_euler_zyx
@@ -362,6 +374,18 @@ class GripperScene:
         self._tcfg = ThrusterConfig.from_yaml_dict(_vcfg)
         self._t200 = T200Group(self._tcfg)
         self._allocator = StaticArduSubAllocator()
+        self._stabilizer = (
+            ArduSubStabilizer(self._tcfg, stabilize_config)
+            if ardusub_stabilize else None
+        )
+        self._last_motor_commands = np.zeros(
+            self._tcfg.num_rotors, dtype=np.float64)
+        if self._stabilizer is not None:
+            cfg = self._stabilizer.config
+            print("[scene] ArduSub STABILIZE: roll/pitch level, direct heave, "
+                  "manual yaw "
+                  f"(angle_p={cfg.angle_p}, rate_p={cfg.rate_p}, "
+                  f"motor_limit={cfg.max_correction:g})")
 
         # ----- World + stage ----------------------------------------------
         self._world = World(stage_units_in_meters=1.0,
@@ -369,7 +393,7 @@ class GripperScene:
         add_reference_to_stage(usd_path=ENV_USD, prim_path="/World/Environment")
         add_reference_to_stage(usd_path=VEHICLE_USD, prim_path="/World/Vehicle")
         add_reference_to_stage(usd_path=GRIPPER_USD, prim_path="/World/Gripper")
-        self._stage = omni_usd_mod.get_context().get_stage()
+        self._stage = get_current_stage()
 
         # Hide the decorative target cube baked onto the pool floor by
         # environment.usd (/Environment/Target/Cube) — a static marker, not used
@@ -451,13 +475,13 @@ class GripperScene:
             _cjoint.CreateLocalRot0Attr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
             _cjoint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
 
-        # Articulation + RigidPrimView (two world.reset() per Isaac quirk).
+        # Core Experimental wrappers subscribe to PHYSICS_READY themselves, so
+        # both can be created before a single timeline/physics initialization.
         self._rov = Articulation(prim_path="/World/Vehicle",
                                  name=vehicle.lower(),
                                  position=self._spawn.copy(),
                                  orientation=np.array([1.0, 0.0, 0.0, 0.0]))
         self._world.scene.add(self._rov)
-        self._world.reset()
         self._base_view = RigidPrimView(prim_paths_expr="/World/Vehicle/base_link",
                                         name="base_link_view")
         self._world.scene.add(self._base_view)
@@ -496,8 +520,27 @@ class GripperScene:
     @property
     def simulation_app(self):            return self._sim
     @property
+    def timeline_playing(self) -> bool:   return self._world.is_playing
+    @property
+    def timeline_paused(self) -> bool:    return self._world.is_paused
+    @property
     def ardusub_authority(self) -> np.ndarray:
         return self._allocator.authority.copy()
+
+    @property
+    def ardusub_stabilize_enabled(self) -> bool:
+        return self._stabilizer is not None
+
+    @property
+    def stabilize_status(self):
+        return (
+            None if self._stabilizer is None
+            else self._stabilizer.last_status
+        )
+
+    @property
+    def last_motor_commands(self) -> np.ndarray:
+        return self._last_motor_commands.copy()
 
     @property
     def force_render(self) -> bool: return self._force_render
@@ -579,6 +622,13 @@ class GripperScene:
     # ------------------------------------------------------------------
 
     def read_state(self) -> SceneState:
+        # Core Experimental invalidates its physics tensor views when the
+        # timeline stops.  Return the last finite snapshot while paused/stopped
+        # rather than touching an invalid view and flooding PhysX with errors.
+        if not self._world.is_playing:
+            if self._last_state is None:
+                raise RuntimeError("Cannot read state before Isaac physics starts")
+            return self._copy_state(self._last_state)
         pos_w, quat_w = self._base_view.get_world_poses()
         lin_w = self._base_view.get_linear_velocities()
         ang_w = self._base_view.get_angular_velocities()
@@ -590,13 +640,38 @@ class GripperScene:
         nu[0:3] = R.T @ lin
         nu[3:6] = R.T @ ang
         roll, pitch, yaw = self._quat_to_euler(q)
-        return SceneState(
+        state = SceneState(
             pos_w=np.asarray(pos_w[0], dtype=float),
             quat_wxyz=q,
             R_body=R,
             roll=float(roll), pitch=float(pitch), yaw=float(yaw),
             nu=nu, lin_w=lin, ang_w=ang,
         )
+        values = np.concatenate([
+            state.pos_w, state.quat_wxyz, state.nu, state.lin_w, state.ang_w
+        ])
+        if not np.all(np.isfinite(values)):
+            raise RuntimeError(f"Isaac returned a non-finite rigid-body state: {values}")
+        self._last_state = self._copy_state(state)
+        return state
+
+    @staticmethod
+    def _copy_state(state: SceneState) -> SceneState:
+        return SceneState(
+            pos_w=state.pos_w.copy(),
+            quat_wxyz=state.quat_wxyz.copy(),
+            R_body=state.R_body.copy(),
+            roll=state.roll,
+            pitch=state.pitch,
+            yaw=state.yaw,
+            nu=state.nu.copy(),
+            lin_w=state.lin_w.copy(),
+            ang_w=state.ang_w.copy(),
+        )
+
+    def pump_app_while_paused(self) -> None:
+        """Keep the GUI responsive without reading or stepping physics."""
+        self._world.pump_app()
 
     # ------------------------------------------------------------------
     # Per-tick physics: allocator -> t200 -> fossen -> gripper buoyancy
@@ -623,6 +698,14 @@ class GripperScene:
         thrusts : (num_rotors,) ndarray
             Realised per-rotor thrust (post-T200 first-order lag).
         """
+        if not self._world.is_playing:
+            # Do not advance the motor model or touch the invalidated rigid-body
+            # view.  Teleop clears its key state before reaching this guard,
+            # and non-interactive callers get an explicit zero-applied result.
+            if render or (render is None and not self._headless):
+                self._world.pump_app()
+            return np.zeros(self._tcfg.num_rotors, dtype=float)
+
         u_arr = np.asarray(u_cmd, dtype=float).reshape(-1)
         if u_arr.size == 6:
             u_arr = self._command4_from_wrench6(u_arr)
@@ -631,16 +714,29 @@ class GripperScene:
                 f"apply_wrench expects 4-D ArduSub command or legacy 6-D wrench; "
                 f"got shape {np.asarray(u_cmd).shape}"
             )
-        commands = self._allocator.allocate(u_arr)
-        thrusts, _ = self._t200.step(commands, self._dt)
-        user_wb = self._sum_to_wrench(self._tcfg, thrusts)
-
         pos_w, quat_w = self._base_view.get_world_poses()
         lin_w = self._base_view.get_linear_velocities()
         ang_w = self._base_view.get_angular_velocities()
+        quat = np.asarray(quat_w[0], dtype=float)
+        R_body = self._quat_to_rotmat(quat)
+        ang_body = R_body.T @ np.asarray(ang_w[0], dtype=float)
+
+        commands = self._allocator.allocate(u_arr)
+        if self._stabilizer is not None:
+            roll, pitch, _yaw = self._quat_to_euler(quat)
+            commands = self._stabilizer.mix(
+                commands,
+                roll_rad=float(roll),
+                pitch_rad=float(pitch),
+                p_rad_s=float(ang_body[0]),
+                q_rad_s=float(ang_body[1]),
+            )
+        self._last_motor_commands = np.asarray(commands, dtype=float).copy()
+        thrusts, _ = self._t200.step(commands, self._dt)
+        user_wb = self._sum_to_wrench(self._tcfg, thrusts)
 
         force_w, torque_w = self._fossen.compute_wrench_world(
-            quat_wxyz=np.asarray(quat_w[0], dtype=float),
+            quat_wxyz=quat,
             lin_vel_world=np.asarray(lin_w[0], dtype=float),
             ang_vel_world=np.asarray(ang_w[0], dtype=float),
             user_wrench_body=user_wb,
@@ -649,7 +745,6 @@ class GripperScene:
         )
 
         # Gripper buoyancy injection at the gripper's world position.
-        R_body = self._quat_to_rotmat(np.asarray(quat_w[0], dtype=float))
         base_pos_w = np.asarray(pos_w[0], dtype=float)
         gripper_pos_w = base_pos_w + R_body @ GRIPPER_OFFSET
         extra_F = np.array([0.0, 0.0, GRIPPER_BUOY_N])
@@ -679,7 +774,9 @@ class GripperScene:
         )
         if render is None:
             render = (not self._headless) or self._force_render
-        self._world.step(render=render)
+        stepped = self._world.step(render=render)
+        if not stepped:
+            return np.zeros(self._tcfg.num_rotors, dtype=float)
         return thrusts
 
     # ------------------------------------------------------------------
@@ -746,6 +843,10 @@ class GripperScene:
         self._base_view.set_velocities(velocities=np.zeros((1, 6)))
         self._fossen.reset()
         self._t200.reset()
+        if self._stabilizer is not None:
+            self._stabilizer.reset()
+        self._last_motor_commands.fill(0.0)
+        self._last_state = None
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -833,7 +934,7 @@ class ChaseCam:
         self._orient_op.Set(Gf.Quatf(*[float(v) for v in cam_quat]))
 
         # Sensor camera for RGBA grabs.
-        from omni.isaac.sensor import Camera as _IsaacCamera
+        from .isaac6_compat import Camera as _IsaacCamera
         self._isaac_cam = _IsaacCamera(prim_path=self._cam_path,
                                        resolution=self._resolution)
         self._isaac_cam.initialize()

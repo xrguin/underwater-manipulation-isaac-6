@@ -21,7 +21,7 @@ Output: two npz files (train / test, split by whole episodes) in
 
 Run:
 
-    conda activate marinegym && python -m EDMDc.collect_tank
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh -m EDMDc.collect_tank
     python -m EDMDc.edmdc EDMDc/data/tank/tank_train_<TS>.npz
 """
 from __future__ import annotations

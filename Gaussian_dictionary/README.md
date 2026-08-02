@@ -129,6 +129,34 @@ dynamics. Because this reduced model does not predict `p,q`, compare it first
 in tasks where roll and pitch remain naturally small; the 34-D model remains
 the safer candidate when those couplings matter.
 
+## Isaac 6 closed-loop MPC comparison
+
+Run the Gaussian EDMDc and causal ARX(10)-Gaussian controllers from identical
+settled states against a constant surge target:
+
+```bash
+/home/miaodong/Documents/isaac-sim-6.0/python.sh \
+  -m Gaussian_dictionary.run_mpc_surge_compare \
+  --target-u 0.2 --duration 5 --post-zero-duration 3
+```
+
+The runner uses 20 Hz control, 60 Hz physics, and ArduSub-style STABILIZE by
+default. The reference is `0.2 m/s` from 0–5 seconds and zero from 5–8 seconds
+with the command above. It checks that the ARX archive's base Gaussian model
+is byte-identical to the explicitly supplied Gaussian archive. Each run writes
+the complete time series to NPZ, scalar metrics to CSV, a compact diagnostic
+plot, and a real-robot-style 2×2 `u/v/w/r` velocity-tracking plot to
+`Gaussian_dictionary/results/`.
+
+Aggregate two or more independent result archives into a mean ± one sample
+standard-deviation plot with:
+
+```bash
+python -m Gaussian_dictionary.plot_mpc_repeat_stats \
+  Gaussian_dictionary/results/repeat_*/trial_*.npz \
+  --output Gaussian_dictionary/results/mpc_repeat_stats.png
+```
+
 ## Test
 
 ```bash

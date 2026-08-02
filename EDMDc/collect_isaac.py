@@ -32,10 +32,10 @@ shared `aprbs_sequence` / `sample_initial_eta_v`.
 
 Usage:
     # GUI: one short trajectory, surge-only APRBS (no --headless).
-    ~/miniconda3/envs/marinegym/bin/python -m EDMDc.collect_isaac \\
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh -m EDMDc.collect_isaac \\
         --n 1 --episode-s 8 --fx-only
 
-    ~/miniconda3/envs/marinegym/bin/python -m EDMDc.collect_isaac \\
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh -m EDMDc.collect_isaac \\
         --n 5 --episode-s 1.0 --seed 0 --headless --out /tmp/isaac_smoke.npz
 """
 from __future__ import annotations
@@ -165,6 +165,12 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--dt", type=float, default=1.0 / 60.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--mass-kg", type=float, default=13.5)
+    ap.add_argument(
+        "--attitude-mode",
+        choices=("stabilize", "manual"),
+        default="manual",
+        help="Roll/pitch mode (default: manual, ArduSub-style stabilize optional).",
+    )
     ap.add_argument("--headless", action="store_true",
                     help="Run without opening Isaac Sim viewports.")
     ap.add_argument("--settle-steps", type=int, default=0,
@@ -323,8 +329,7 @@ if args.video:
     else:
         print(f"[isaac] ffmpeg pre-resolved at {FFMPEG_PATH}")
 
-# SimulationApp must be created before any omni.isaac.* import. Mirrors
-# bluerov_demo.py / mission_demo.py.
+# SimulationApp must be created before Isaac Core Experimental imports.
 import isaacsim  # noqa: F401
 from isaacsim import SimulationApp
 
@@ -345,11 +350,14 @@ for _key in ("/persistent/app/viewport/grid/enabled",
     except Exception:
         pass
 
-from omni.isaac.core import World  # noqa: E402
-from omni.isaac.core.utils.stage import add_reference_to_stage  # noqa: E402
-from omni.isaac.core.articulations import Articulation  # noqa: E402
-from omni.isaac.core.prims import RigidPrimView  # noqa: E402
-from omni.isaac.sensor import Camera  # noqa: E402
+from .isaac6_compat import (  # noqa: E402
+    Articulation,
+    Camera,
+    RigidPrimView,
+    World,
+    add_reference_to_stage,
+    get_current_stage,
+)
 
 # Project-root + EDMDc/ on sys.path so this module survives Isaac's PYTHONPATH
 # reset. Relative `.foo` imports work when invoked as `python -m EDMDc.collect_isaac`;
@@ -370,6 +378,7 @@ from .thrusters import (  # noqa: E402
     sum_to_wrench,
 )
 from .ardusub_allocator import StaticArduSubAllocator  # noqa: E402
+from .ardusub_stabilize import ArduSubStabilizer, ArduSubStabilizeConfig  # noqa: E402
 from .thrust_viz import ThrustVizDrawer  # noqa: E402
 
 from .collect_fossen import (  # noqa: E402
@@ -594,11 +603,17 @@ def main() -> int:
     thruster_cfg_o = ThrusterConfig.from_yaml_dict(_vcfg)
     t200 = T200Group(thruster_cfg_o)
     allocator = StaticArduSubAllocator()
+    stabilizer = (
+        ArduSubStabilizer(thruster_cfg_o, ArduSubStabilizeConfig())
+        if bool(args.attitude_mode == "stabilize")
+        else None
+    )
     print(
         f"[isaac] thruster path: {thruster_cfg_o.num_rotors} rotors "
         f"(StaticArduSubAllocator + T200 → sum_to_wrench), "
         f"authority [Fx,Fy,Fz,Tz]={np.round(allocator.authority, 3).tolist()}"
     )
+    print(f"[isaac] attitude mode: {args.attitude_mode}")
 
     # --- World + scene ----------------------------------------------------
     world = World(stage_units_in_meters=1.0, physics_dt=cfg.dt, backend="numpy")
@@ -611,9 +626,8 @@ def main() -> int:
     # composite COG / inertia automatically; we only have to adjust per-body
     # masses so the composite weight-in-water stays neutral.
     if bool(args.gripper):
-        import omni.usd
         add_reference_to_stage(usd_path=GRIPPER_USD, prim_path="/World/Gripper")
-        _stage = omni.usd.get_context().get_stage()
+        _stage = get_current_stage()
 
         _gripper_base_prim = _stage.GetPrimAtPath("/World/Gripper/base_link")
         UsdPhysics.MassAPI(_gripper_base_prim).GetMassAttr().Set(GRIPPER_MASS_KG)
@@ -694,12 +708,26 @@ def main() -> int:
         orientation=np.array([1.0, 0.0, 0.0, 0.0]),
     )
     world.scene.add(rov)
-    world.reset()
     base_view = RigidPrimView(
         prim_paths_expr="/World/Vehicle/base_link", name="base_link_view",
     )
     world.scene.add(base_view)
     world.reset()
+
+    _timeline_waiting = False
+
+    def _wait_for_timeline() -> bool:
+        """Pump UI/render updates without touching physics while paused."""
+        nonlocal _timeline_waiting
+        while simulation_app.is_running() and not world.is_playing:
+            if not _timeline_waiting:
+                print("[isaac] timeline paused/stopped — collection suspended")
+                _timeline_waiting = True
+            world.pump_app()
+        if _timeline_waiting and simulation_app.is_running():
+            print("[isaac] timeline resumed — collection continuing")
+            _timeline_waiting = False
+        return bool(simulation_app.is_running())
 
     # Optional MP4 chase-camera recording.
     isaac_cam = None
@@ -708,8 +736,7 @@ def main() -> int:
     raw_video_path = None
     if args.video:
         import cv2
-        import omni.usd
-        stage = omni.usd.get_context().get_stage()
+        stage = get_current_stage()
         cam_path, chase_translate_op = _setup_chase_camera(stage)
         isaac_cam = Camera(prim_path=cam_path, resolution=CAM_RESOLUTION)
         isaac_cam.initialize()
@@ -829,8 +856,13 @@ def main() -> int:
         fossen.reset()
         if t200 is not None:
             t200.reset()
+        if stabilizer is not None:
+            stabilizer.reset()
         if int(args.settle_steps) > 0:
             for _ in range(int(args.settle_steps)):
+                if not _wait_for_timeline():
+                    simulation_app.close()
+                    return 0
                 base_view.apply_forces_and_torques_at_pos(
                     forces=np.zeros((1, 3)), torques=np.zeros((1, 3)),
                     is_global=True,
@@ -855,12 +887,23 @@ def main() -> int:
         for k in range(n_steps):
             if truncated_this:
                 break
+            if not _wait_for_timeline():
+                truncated_this = True
+                break
             u_cmd = _clip_command(U_seq[k])
             pos_w, quat_w = base_view.get_world_poses()
             lin_w = base_view.get_linear_velocities()
             ang_w = base_view.get_angular_velocities()
             u_tot = np.asarray(u_cmd, dtype=float)
             commands = allocator.allocate(u_tot)
+            if stabilizer is not None:
+                commands = stabilizer.mix(
+                    commands,
+                    roll_rad=float(eta[3]),
+                    pitch_rad=float(eta[4]),
+                    p_rad_s=float(v_body[3]),
+                    q_rad_s=float(v_body[4]),
+                )
             thrusts_per_rotor, _ = t200.step(commands, cfg.dt)
             user_wb = sum_to_wrench(thruster_cfg_o, thrusts_per_rotor)
 
@@ -926,6 +969,7 @@ def main() -> int:
                         pass
 
             eta_next, v_body_next = _read_state(base_view)
+            eta = eta_next
             if not _in_envelope(eta_next):
                 truncated_this = True
                 print(
@@ -1017,6 +1061,7 @@ def main() -> int:
         command_max_pos=COMMAND_MAX_POS,
         command_max_neg=COMMAND_MAX_NEG,
         ardusub_authority=allocator.authority,
+        attitude_mode=str(args.attitude_mode),
         max_thrust_per_motor=MAX_THRUST_PER_MOTOR_N,
         thrust_viz=bool(thrust_viz is not None),
         spawn_flat_pool=bool(args.spawn_flat_pool),

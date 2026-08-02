@@ -3,7 +3,7 @@
 Draws one coloured line segment per thruster, anchored at the rotor's
 body-frame position, pointing along its thrust axis, length proportional to
 realized thrust magnitude. Optionally adds a 2-line "V" arrowhead at the tip
-since omni.isaac.debug_draw has no native arrowhead primitive.
+since the Isaac debug-draw interface has no native arrowhead primitive.
 
 Usage from bluerov_demo.py:
 
@@ -97,10 +97,10 @@ class ThrustVizDrawer:
         if self._iface is not None or self._init_failed:
             return
         try:
-            from omni.isaac.debug_draw import _debug_draw
+            from isaacsim.util.debug_draw import _debug_draw
             self._iface = _debug_draw.acquire_debug_draw_interface()
         except Exception as e:
-            print(f"[thrust_viz] omni.isaac.debug_draw unavailable ({e}); "
+            print(f"[thrust_viz] isaacsim.util.debug_draw unavailable ({e}); "
                   f"thrust arrows disabled.")
             self._init_failed = True
 

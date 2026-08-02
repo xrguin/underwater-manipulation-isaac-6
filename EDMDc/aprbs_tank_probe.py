@@ -19,8 +19,10 @@ count exciting samples only.
 
 Run:
 
-    conda activate marinegym && python -m EDMDc.aprbs_tank_probe          # headless, 3 eps
-    python -m EDMDc.aprbs_tank_probe --gui --seconds 180                  # watch it
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh \\
+        -m EDMDc.aprbs_tank_probe                         # headless, 3 eps
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh \\
+        -m EDMDc.aprbs_tank_probe --gui --seconds 180     # watch it
 """
 from __future__ import annotations
 

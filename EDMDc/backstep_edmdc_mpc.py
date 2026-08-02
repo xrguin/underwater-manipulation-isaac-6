@@ -20,10 +20,10 @@ CLI knobs vs the LQR script:
   --r-diag            explicit 4-axis R override.
 
 Run:
-    conda activate marinegym
-    python -m EDMDc.backstep_edmdc_mpc                                # GUI, sweep-best
-    python -m EDMDc.backstep_edmdc_mpc --headless --no-video           # batch
-    python -m EDMDc.backstep_edmdc_mpc --r-diag 1e-3 1e-3 1e-3 1e-3
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh \\
+        -m EDMDc.backstep_edmdc_mpc                         # GUI
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh \\
+        -m EDMDc.backstep_edmdc_mpc --headless --no-video   # batch
 """
 from __future__ import annotations
 
@@ -86,6 +86,10 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--mass-kg", type=float, default=13.5)
     ap.add_argument("--neutral-buoyancy", action=argparse.BooleanOptionalAction,
                     default=True)
+    ap.add_argument("--attitude-mode", choices=("stabilize", "manual"),
+                    default="stabilize",
+                    help="Roll/pitch mode (default: ArduSub-style stabilize; "
+                         "heave and yaw remain controller-owned).")
     ap.add_argument("--spawn", type=float, nargs=3, default=[0.0, 0.0, -1.6],
                     metavar=("X", "Y", "Z"),
                     help="World-frame spawn position passed to GripperScene "
@@ -251,6 +255,7 @@ def main() -> int:
         neutral_buoyancy=bool(args.neutral_buoyancy),
         payload_cube=bool(args.payload_cube),
         spawn_pos=np.asarray(args.spawn, dtype=np.float64),
+        ardusub_stabilize=args.attitude_mode == "stabilize",
     )
     if args.floor_grid:
         scene.add_floor_grid()

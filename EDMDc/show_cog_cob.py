@@ -22,9 +22,12 @@ the COB shift a re-trim would need for a level (0 deg) equilibrium.
 
 Run:
 
-    conda activate marinegym && python -m EDMDc.show_cog_cob --headless
-    python -m EDMDc.show_cog_cob                 # GUI, orbit the markers
-    python -m EDMDc.show_cog_cob --payload-cube  # include the 1 kg cube
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh \\
+        -m EDMDc.show_cog_cob --headless
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh \\
+        -m EDMDc.show_cog_cob                    # GUI, orbit the markers
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh \\
+        -m EDMDc.show_cog_cob --payload-cube     # include the 1 kg cube
 """
 from __future__ import annotations
 
@@ -79,7 +82,7 @@ def main() -> int:
                          payload_cube=args.payload_cube)
 
     # ----- extra views to read per-link mass + COM from PhysX ---------------
-    from omni.isaac.core.prims import RigidPrimView
+    from .isaac6_compat import RigidPrimView
 
     grip_view = RigidPrimView(prim_paths_expr="/World/Gripper/base_link",
                               name="grip_com_view")
@@ -267,7 +270,7 @@ def main() -> int:
           f"currently z-only coBM={scene._fossen.p.cob_offset} m)")
 
     # ----- screenshots / GUI -------------------------------------------------
-    from omni.isaac.sensor import Camera
+    from .isaac6_compat import Camera
 
     def make_cam(path, pos, target, res=(1280, 720), focal=24.0):
         prim = UsdGeom.Camera.Define(scene.stage, path)

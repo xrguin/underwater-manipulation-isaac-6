@@ -40,11 +40,10 @@ cross-cancellation by keeping the LQR as a black-box inner loop.
 
 Run:
 
-    conda activate marinegym
-    python -m EDMDc.backstep_edmdc_lqr                                # GUI, sweep-best (R_scale=0.01)
-    python -m EDMDc.backstep_edmdc_lqr --r-scale 1.0                  # revert to library defaults
-    python -m EDMDc.backstep_edmdc_lqr --omega 0.32 0.17 0.39         # tune position ghost bandwidth
-    python -m EDMDc.backstep_edmdc_lqr --headless --no-video          # fast headless
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh \\
+        -m EDMDc.backstep_edmdc_lqr                         # GUI
+    /home/miaodong/Documents/isaac-sim-6.0/python.sh \\
+        -m EDMDc.backstep_edmdc_lqr --headless --no-video   # fast headless
 
 Defaults (no flags): R-scale=0.01 -> R_diag=(1e-6, 1e-6, 1e-6, 1e-5). This is
 the composite-best from the LQR R-scale sweep (`analyze_lqr_R_sweep.py`).
@@ -109,6 +108,10 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--mass-kg", type=float, default=13.5)
     ap.add_argument("--neutral-buoyancy", action=argparse.BooleanOptionalAction,
                     default=True)
+    ap.add_argument("--attitude-mode", choices=("stabilize", "manual"),
+                    default="stabilize",
+                    help="Roll/pitch mode (default: ArduSub-style stabilize; "
+                         "heave and yaw remain controller-owned).")
     ap.add_argument("--spawn", type=float, nargs=3, default=[0.0, 0.0, -1.6],
                     metavar=("X", "Y", "Z"),
                     help="World-frame spawn position passed to GripperScene "
@@ -232,6 +235,7 @@ def main() -> int:
         headless=bool(args.headless),
         neutral_buoyancy=bool(args.neutral_buoyancy),
         spawn_pos=np.asarray(args.spawn, dtype=np.float64),
+        ardusub_stabilize=args.attitude_mode == "stabilize",
     )
     if args.floor_grid:
         scene.add_floor_grid()

@@ -23,7 +23,7 @@ Draws coloured point markers each physics step at three locations on the ROV:
               i.e. where the combined hydro + buoyancy + thrust force effectively
               pushes. Only drawn when that argument is provided.
 
-Uses omni.isaac.debug_draw.draw_points (not draw_lines), so it does not collide
+Uses the Isaac debug-draw ``draw_points`` call (not ``draw_lines``), so it does not collide
 with ThrustVizDrawer's clear_lines() each step — both can run simultaneously.
 
 Usage from bluerov_demo.py:
@@ -146,10 +146,10 @@ class BodyFrameVizDrawer:
         if self._iface is not None or self._init_failed:
             return
         try:
-            from omni.isaac.debug_draw import _debug_draw
+            from isaacsim.util.debug_draw import _debug_draw
             self._iface = _debug_draw.acquire_debug_draw_interface()
         except Exception as e:
-            print(f"[body_frame_viz] omni.isaac.debug_draw unavailable ({e}); "
+            print(f"[body_frame_viz] isaacsim.util.debug_draw unavailable ({e}); "
                   f"markers disabled.")
             self._init_failed = True
 
