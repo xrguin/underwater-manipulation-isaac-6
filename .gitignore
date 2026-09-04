@@ -14,7 +14,7 @@ EDMDc/recording/
 # .gitattributes and assets/README.md for checkout instructions.
 
 # Local agent/editor state
-.claude/settings.local.json
+.claude/
 .agents/
 .codex/
 nohup.out
