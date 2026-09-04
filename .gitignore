@@ -17,6 +17,8 @@ EDMDc/recording/
 .claude/
 .agents/
 .codex/
+CLAUDE.md
+AGENTS.md
 nohup.out
 
 # Literature PDFs — keep local (copyright)
