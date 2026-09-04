@@ -1,0 +1,4 @@
+# Keep the existing asset paths while storing large binary USDs in Git LFS.
+assets/BlueROVHeavy/bluerov_heavy_fine.usd filter=lfs diff=lfs merge=lfs -text
+assets/BlueROVHeavy/Props/instanceable_meshes.usd filter=lfs diff=lfs merge=lfs -text
+bluerov_heavy_cad/bluerov_heavy.usd filter=lfs diff=lfs merge=lfs -text

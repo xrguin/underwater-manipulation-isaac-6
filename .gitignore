@@ -10,9 +10,8 @@ EDMDc/data/*
 !EDMDc/data/gaussian/
 EDMDc/recording/
 
-# Large Isaac USD assets (206 MB fine-mesh USD exceeds GitHub's 100 MB limit).
-# See assets/README.md; obtain from the local workstation or asset share.
-assets/BlueROVHeavy/
+# Isaac assets are versioned. Large CAD/mesh USDs use Git LFS; see
+# .gitattributes and assets/README.md for checkout instructions.
 
 # Local agent/editor state
 .claude/settings.local.json

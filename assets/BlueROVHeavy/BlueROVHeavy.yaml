@@ -1,0 +1,40 @@
+name: BlueROVHeavy
+
+drag_coef: 0.3
+volume: 0.0134
+coBM: 0.01
+hydro_coef:
+  added_mass: [6.36, 7.12, 18.68, 0.189, 0.135, 0.222]
+  linear_damping: [13.7, 0.0, 33.0, 0.8, 0.0, 0.0]
+  quadratic_damping: [141.0, 217.0, 190.0, 1.19, 0.929, 1.55]
+rotor_configuration:
+  num_rotors: 8
+  directions: [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0]
+  time_constants: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+  force_constants: [4.4e-07, 4.4e-07, 4.4e-07, 4.4e-07, 4.4e-07, 4.4e-07, 4.4e-07, 4.4e-07]
+  moment_constants: [1.3677728816219314e-09, 1.3677728816219314e-09, 1.3677728816219314e-09, 1.3677728816219314e-09, 1.3677728816219314e-09, 1.3677728816219314e-09, 1.3677728816219314e-09, 1.3677728816219314e-09]
+  max_rotation_velocities: [3900, 3900, 3900, 3900, 3900, 3900, 3900, 3900]
+  # Body-frame positions. Originally HoloOcean/BYU CAD-derived (MIT), but the
+  # z-coords are flipped here to match the physical BlueROV2-Heavy frame
+  # (verticals on TOP, vectored horizontals on BOTTOM — verified against the
+  # front-view photo `heavy-front-1.webp`). Body +z is up, so verticals at
+  # z = +0.085 m sit 8.5 cm above the angled horizontals at z = -0.085 m.
+  positions:
+  - [ 0.156, -0.111, -0.04]   # rotor_0  AFP  fore-port  angled  (below COG)
+  - [ 0.156,  0.111, -0.04]   # rotor_1  AFS  fore-starboard  angled
+  - [-0.156, -0.111, -0.04]   # rotor_2  ABP  aft-port  angled
+  - [-0.156,  0.111, -0.04]   # rotor_3  ABS  aft-starboard  angled
+  - [ 0.120, -0.218,  0.0]   # rotor_4  VFP  fore-port  vertical  (above COG)
+  - [ 0.120,  0.218,  0.0]   # rotor_5  VFS  fore-starboard  vertical
+  - [-0.120, -0.218,  0.0]   # rotor_6  VBP  aft-port  vertical
+  - [-0.120,  0.218,  0.0]   # rotor_7  VBS  aft-starboard  vertical
+  # Body-frame thrust direction unit vectors (also from HoloOcean).
+  thrust_axes:
+  - [ 0.707,  0.707, 0.0]      # rotor_0  AFP  thrust fore-starboard
+  - [ 0.707, -0.707, 0.0]      # rotor_1  AFS  thrust fore-port
+  - [-0.707,  0.707, 0.0]      # rotor_2  ABP  thrust aft-starboard
+  - [-0.707, -0.707, 0.0]      # rotor_3  ABS  thrust aft-port
+  - [0.0, 0.0, 1.0]            # rotor_4  VFP  up
+  - [0.0, 0.0, 1.0]            # rotor_5  VFS  up
+  - [0.0, 0.0, 1.0]            # rotor_6  VBP  up
+  - [0.0, 0.0, 1.0]            # rotor_7  VBS  up

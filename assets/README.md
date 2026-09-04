@@ -10,7 +10,6 @@ Current code loads the BlueROV2 Heavy model through the small wrapper USD:
 EDMDc/*.py
   -> assets/BlueROVHeavy/BlueROVHeavy.usd
       -> ../../bluerov_heavy_cad/bluerov_heavy.usd
-          -> assets/BlueROVHeavy/bluerov_heavy_fine.usd
 ```
 
 The Python scripts build the vehicle asset path from the vehicle name:
@@ -45,26 +44,55 @@ Then Isaac Sim references `VEHICLE_USD` into the stage, usually at
 
 - `bluerov_heavy_cad/bluerov_heavy.usd`
   - Compatibility path referenced by `BlueROVHeavy.usd`.
-  - In this workspace it is a symlink to
-    `assets/BlueROVHeavy/bluerov_heavy_fine.usd`.
+  - A regular file, currently byte-identical to
+    `assets/BlueROVHeavy/bluerov_heavy_fine.usd`, not a symlink.
+  - The current simulation loads this copy. Editing only the fine USD copy
+    does not change the visual model loaded through the wrapper.
 
-## Upload Recommendation
+## Download and Reuse
 
-For future reuse, upload both:
+Both directories are versioned and should be kept together:
 
 ```text
 assets/
 bluerov_heavy_cad/
 ```
 
-They should be kept at the same relative locations as in this repository. The
+Keep them at the same relative locations as in this repository. The
 wrapper USD currently depends on the `../../bluerov_heavy_cad/bluerov_heavy.usd`
 path, so moving only `assets/` can break the high-detail visual reference.
 
-If the upload target does not preserve symlinks, replace
-`bluerov_heavy_cad/bluerov_heavy.usd` with a real copy of
-`assets/BlueROVHeavy/bluerov_heavy_fine.usd`, or recreate the symlink after
-download.
+The two high-detail CAD copies and `BlueROVHeavy/Props/instanceable_meshes.usd`
+use **Git Large File Storage (LFS)**. The matching CAD copies share an LFS
+content identifier, while both required paths remain available on checkout.
+Other small USD/USDA and YAML files use regular Git.
+
+Install Git LFS on the destination machine, then clone normally:
+
+```bash
+git lfs install
+git clone https://github.com/xrguin/underwater-manipulation-isaac-6.git
+cd underwater-manipulation-isaac-6
+git lfs pull
+git lfs fsck
+```
+
+For an existing checkout, run `git pull` followed by `git lfs pull`. If a large
+USD opens as a short text file beginning with
+`version https://git-lfs.github.com/spec/v1`, it is an LFS pointer rather than
+the actual asset: fetch the LFS data before starting Isaac. Prefer an
+LFS-enabled clone; do not assume GitHub's source ZIP contains the large assets.
+Downloading the assets does not install Isaac Sim or configure its Python
+runtime; see the project's `ISAAC6_MIGRATION.md` for those requirements.
+
+### Known dependency limitation
+
+The original `environment.usd` references
+`textures/apriltags/tag36h11/tag36_11_00000.png` for its west-wall tag. That PNG
+was already absent from the local asset collection and is not included here;
+the tag will not have its intended texture. The tank, deep-pool, and pool25
+environment files do not reference that missing PNG. `OmniPBR.mdl`, referenced
+by the instanceable mesh asset, is supplied by the Isaac Sim installation.
 
 ## Directly Loading the Fine USD
 
